@@ -36,7 +36,7 @@ namespace Pinger
         static async Task Run(PingArgs args)
         {
             await Task.Delay(args.Delay);
-            var replies = args.Urls.ToDictionary(u => u, u => Ping(u, args.Attempts));
+            var replies = args.Urls.ToDictionary(u => u, u => Ping(u, args.Timeout, args.Attempts));
 
             if ((args.Formats & OutputFormats.Console) != 0)
             {
@@ -98,7 +98,7 @@ namespace Pinger
                    (double) replies.Count(r => r.RoundtripTime >= 0);
         }
 
-        static List<PingResponse> Ping(string url, int attempts = 1)
+        static List<PingResponse> Ping(string url, int timeout, int attempts = 1)
         {
             if (attempts < 1)
             {
@@ -112,7 +112,7 @@ namespace Pinger
                 PingResponse response;
                 try
                 {
-                    var reply = ping.Send(url);
+                    var reply = ping.Send(url, timeout);
 
                     if (reply?.Status == IPStatus.Success)
                     {
