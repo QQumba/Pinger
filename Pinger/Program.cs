@@ -18,6 +18,7 @@ namespace Pinger
                 Console.WriteLine(PingArgs.UrlsArg + " | " + PingArgs.UrlsFileArg);
                 Console.WriteLine(PingArgs.AttemptsArg);
                 Console.WriteLine(PingArgs.DelayArg);
+                Console.WriteLine(PingArgs.TimeoutArgName);
                 Console.WriteLine(PingArgs.FormatArgName + " console | txt | xml | html");
                 Console.WriteLine(PingArgs.OutputArgName + " default name: output");
                 return;
