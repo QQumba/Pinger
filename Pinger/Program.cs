@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.NetworkInformation;
 using System.Threading.Tasks;
 
@@ -11,168 +13,234 @@ namespace Pinger
     {
         static async Task Main(string[] args)
         {
-            var url = args.GetArg("--urls");
-            IEnumerable<string> urls = new List<string>();
-            if (url is null)
+            if (!args.Any() || args.Contains("--help"))
             {
-                var urlSource = args.GetArg("--urls-src");
-                if (urlSource is null)
-                {
-                    Console.WriteLine("expect one of --urls or --urls-src args");
-                    return;
-                }
-
-                if (!urlSource.EndsWith(".txt") || !File.Exists(urlSource))
-                {
-                    Console.WriteLine($"{urlSource} file does not exist or is not valid .txt file");
-                }
-
-                urls = GetUrlsFromFile(urlSource);
-            }
-            else
-            {
-                urls = args.GetUrls("--url", new[] { "--urls-src", "--repeat", "--o-format", "--o-name" });
-            }
-
-            var repeat = args.GetArg("--repeat");
-            var outFormat = args.GetArg("--o-format");
-            var outFile = args.GetArg("--o-name");
-            var repeatValue = 1;
-            if (repeat is not null && int.TryParse(repeat, out var r))
-            {
-                repeatValue = r;
+                Console.WriteLine(PingArgs.UrlsArg + " | " + PingArgs.UrlsFileArg);
+                Console.WriteLine(PingArgs.AttemptsArg);
+                Console.WriteLine(PingArgs.DelayArg);
+                Console.WriteLine(PingArgs.FormatArgName + " console | txt | xml | html");
+                Console.WriteLine(PingArgs.OutputArgName + " default name: output");
                 return;
             }
 
-            if (outFormat is null)
+            try
             {
-                if (outFile is not null)
-                {
-                    Console.WriteLine("both --o-format and --o-name should be provided");
-                    return;
-                }
+                await Run(new PingArgs(args));
             }
-
-            foreach (var u in urls)
+            catch (Exception e)
             {
-                var time = Ping(u, repeatValue);
-                if (outFormat is null) continue;
-                if (outFile is null)
-                {
-                    //WriteToFile(outFormat);
-                    continue;
-                }
-
-                //WriteToFile(outFormat, outFile);
+                Console.WriteLine(e.Message);
             }
         }
 
-        static float Ping(string url, int repeat = 1)
+        static async Task Run(PingArgs args)
         {
+            await Task.Delay(args.Delay);
+            var replies = args.Urls.ToDictionary(u => u, u => Ping(u, args.Attempts));
+
+            if ((args.Formats & OutputFormats.Console) != 0)
+            {
+                Console.WriteLine($"avg roundtrip time: {CalculateAvgRoundtripTime(replies)}");
+                foreach (var reply in replies)
+                {
+                    Console.WriteLine();
+                    if (reply.Value.Any(r => r.RoundtripTime < 0))
+                    {
+                        var sum = reply.Value.Select(r => r.RoundtripTime).Count(time => time < 0);
+                        Console.WriteLine($"address: {reply.Key} (cannot reach {sum} times)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"address: {reply.Key}");
+                    }
+
+                    Console.WriteLine(
+                        $"roundtrip time: {CalculateAvgRoundtripTime(reply.Value)}");
+                }
+            }
+
+            if ((args.Formats & OutputFormats.Txt) != 0)
+            {
+                WriteToTxt(replies, args.OutputFileName);
+            }
+
+            if ((args.Formats & OutputFormats.Html) != 0)
+            {
+                WriteToHtml(replies, args.OutputFileName);
+            }
+
+            if ((args.Formats & OutputFormats.Xml) != 0)
+            {
+                WriteToXml(replies, args.OutputFileName);
+            }
+        }
+
+        static double CalculateAvgRoundtripTime(Dictionary<string, List<PingResponse>> replies)
+        {
+            var total = 0D;
+            var count = 0;
+            foreach (var reply in replies)
+            {
+                var result = CalculateAvgRoundtripTime(reply.Value);
+                if (!double.IsNaN(result))
+                {
+                    total += result;
+                    count++;
+                }
+            }
+
+            return total / count;
+        }
+
+        static double CalculateAvgRoundtripTime(List<PingResponse> replies)
+        {
+            return replies.Where(r => r.RoundtripTime >= 0).Sum(r => r.RoundtripTime) /
+                   (double) replies.Count(r => r.RoundtripTime >= 0);
+        }
+
+        static List<PingResponse> Ping(string url, int attempts = 1)
+        {
+            if (attempts < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(attempts));
+            }
+
             var ping = new Ping();
-            var total = 0L;
-            for (var i = 0; i < repeat; i++)
+            var responses = new List<PingResponse>();
+            for (var i = 0; i < attempts; i++)
             {
-                var reply = ping.Send(url);
-                if (reply is { Status: IPStatus.Success })
+                PingResponse response;
+                try
                 {
-                    Console.WriteLine($"reply from: {reply.Address}");
-                    Console.WriteLine($"round trip times in milli-seconds: {reply.RoundtripTime}");
-                    total += reply.RoundtripTime;
+                    var reply = ping.Send(url);
+
+                    if (reply?.Status == IPStatus.Success)
+                    {
+                        response = new PingResponse()
+                        {
+                            Address = reply.Address.ToString(),
+                            RoundtripTime = reply.RoundtripTime
+                        };
+                    }
+                    else
+                    {
+                        response = new PingResponse()
+                        {
+                            Address = url,
+                            RoundtripTime = -1
+                        };
+                    }
+                }
+                catch (Exception e)
+                {
+                    response = new PingResponse()
+                    {
+                        Address = url,
+                        RoundtripTime = -1
+                    };
                 }
 
-                if (reply != null && reply.Status != IPStatus.Success)
+                responses.Add(response);
+            }
+
+            return responses;
+        }
+
+        static void WriteToTxt(Dictionary<string, List<PingResponse>> replies, string path)
+        {
+            using var sw = new StreamWriter(path + ".txt");
+
+            sw.WriteLine($"avg roundtrip time: {CalculateAvgRoundtripTime(replies)}");
+            foreach (var reply in replies)
+            {
+                sw.WriteLine();
+                if (reply.Value.Any(r => r.RoundtripTime < 0))
                 {
-                    Console.WriteLine("cannot be reached");
+                    var sum = reply.Value.Select(r => r.RoundtripTime).Count(time => time < 0);
+                    sw.WriteLine($"address: {reply.Key} (cannot reach {sum} times)");
                 }
-            }
+                else
+                {
+                    sw.WriteLine($"address: {reply.Key}");
+                }
 
-            return (float)total / repeat;
+                sw.WriteLine(
+                    $"roundtrip time: {CalculateAvgRoundtripTime(reply.Value)}");
+            }
         }
 
-        static string[] GetUrlsFromFile(string path)
+        static void WriteToXml(Dictionary<string, List<PingResponse>> replies, string path)
         {
-            var urls = new List<string>();
+            using var sw = new StreamWriter(path + ".xml");
 
-            using var sr = new StreamReader(path);
-            string url;
-            while ((url = sr.ReadLine()) is not null)
+            sw.WriteLine("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>");
+            sw.WriteLine("<ping>");
+            sw.WriteLine("<totalAvg>");
+            sw.WriteLine($"avg roundtrip time: {CalculateAvgRoundtripTime(replies)}");
+            sw.WriteLine("</totalAvg>");
+
+            sw.WriteLine("<results>");
+            foreach (var reply in replies)
             {
-                urls.Add(url);
+                sw.WriteLine("<result>");
+
+                if (reply.Value.Any(r => r.RoundtripTime < 0))
+                {
+                    var sum = reply.Value.Select(r => r.RoundtripTime).Count(time => time < 0);
+                    sw.WriteLine("<note>");
+                    sw.WriteLine($"cannot reach {sum} times");
+                    sw.WriteLine("</note>");
+                }
+
+                sw.WriteLine("<address>");
+                sw.WriteLine(reply.Key);
+                sw.WriteLine("</address>");
+
+                sw.WriteLine("<roundtripTime>");
+                sw.WriteLine(CalculateAvgRoundtripTime(reply.Value));
+                sw.WriteLine("</roundtripTime>");
+
+                sw.WriteLine("</result>");
             }
 
-            return urls.ToArray();
+            sw.WriteLine("</results>");
+            sw.WriteLine("</ping>");
         }
 
-        static void WriteToFile(string url, float time, string format, string name = "output")
+        static void WriteToHtml(Dictionary<string, List<PingResponse>> replies, string path)
         {
-            switch (format)
+            using var sw = new StreamWriter(path + ".html");
+
+            sw.WriteLine("<html>");
+            sw.WriteLine("<body>");
+
+            sw.WriteLine($"avg roundtrip time: {CalculateAvgRoundtripTime(replies)}");
+            sw.WriteLine("<br>");
+            sw.WriteLine("<br>");
+            foreach (var reply in replies)
             {
-                case "xml":
-                    WriteToXml(url, time, name + ".xml");
-                    break;
-                case "txt":
-                    WriteToTxt(url, time, name + ".txt");
-                    break;
-                case "html":
-                    WriteToHtml(url, time, name + ".html");
-                    break;
-            }
-        }
+                sw.WriteLine("<div>");
+                sw.WriteLine();
+                if (reply.Value.Any(r => r.RoundtripTime < 0))
+                {
+                    var sum = reply.Value.Select(r => r.RoundtripTime).Count(time => time < 0);
+                    sw.WriteLine($"address: {reply.Key} (cannot reach {sum} times)");
+                }
+                else
+                {
+                    sw.WriteLine($"address: {reply.Key}");
+                }
 
-        static void WriteToTxt(string text, float time, string path)
-        {
-            var file = File.Open(path, FileMode.Append, FileAccess.Write);
-            using var sw = new StreamWriter(file);
-
-            sw.WriteLine("time:");
-        }
-
-        static void WriteToXml(string text, float time, string path)
-        {
-        }
-
-        static void WriteToHtml(string text, float time, string path)
-        {
-        }
-    }
-
-    static class ArgsReader
-    {
-        public static string GetArg(this string[] args, string argName)
-        {
-            var indexOfArgName = Array.IndexOf(args, argName);
-
-            if (indexOfArgName == -1 || indexOfArgName == args.Length)
-            {
-                return null;
+                sw.WriteLine("</div>");
+                sw.WriteLine("<div>");
+                sw.WriteLine(
+                    $"roundtrip time: {CalculateAvgRoundtripTime(reply.Value)}");
+                sw.WriteLine("</div>");
+                sw.WriteLine("<br>");
             }
 
-            return args[indexOfArgName + 1];
-        }
-
-        public static IEnumerable<string> GetUrls(this string[] args, string urlsArgsName, string[] argNames)
-        {
-            var indexOfArgName = Array.IndexOf(args, urlsArgsName);
-
-            if (indexOfArgName == -1 || indexOfArgName == args.Length)
-            {
-                return Array.Empty<string>();
-            }
-
-            var urls = new List<string>();
-            var c = indexOfArgName + 1;
-            while (!argNames.Contains(args[indexOfArgName + c]) && indexOfArgName + c < args.Length)
-            {
-                urls.Add(args[indexOfArgName + c]);
-            }
-
-            return urls;
-        }
-
-        public static bool HasFlag(this string[] args, string flag)
-        {
-            return args.Contains(flag);
+            sw.WriteLine("</body>");
+            sw.WriteLine("</html>");
         }
     }
 }
